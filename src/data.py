@@ -619,3 +619,30 @@ def future_spend(group, days=90):
     return pd.Series(totals, index=group.index, dtype=float)
 
 
+
+def add_candidate_features(data):
+    out = data.copy()
+
+    recency = data["days_since_previous_purchase"]
+    mean_gap = data["prior_mean_gap_days"]
+    valid_gap = data["prior_purchase_count"].ge(2) & mean_gap.gt(0)
+
+    out["gap_ratio"] = recency.where(recency.ge(0)).div(
+        mean_gap.where(valid_gap)
+    )
+
+    net_value = data["Total Liquido"]
+    net = net_value.where(net_value.gt(0))
+    cost = data["Custo"]
+
+    out["margin"] = net.sub(cost).div(net).where(cost.gt(0))
+    out["tax_rate"] = data["Total Imp_"].div(net)
+    out["cost_is_zero"] = cost.eq(0).astype("int8")
+
+    gross = data["Total Bruto"]
+    discounts = data["Total Desc_ Linha"] + data["Total Desc_ Global"]
+    out["discount_share"] = discounts.div(gross.where(gross.gt(0)))
+
+    return out
+
+
