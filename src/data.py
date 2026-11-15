@@ -1,4 +1,9 @@
-"""Data loading."""
+"""Data loading, consistency checks against the purchase history, and candidate features."""
+
+import re
+from numbers import Integral
+
+import numpy as np
 import pandas as pd
 
 
@@ -7,14 +12,11 @@ def load_data(path: str) -> pd.DataFrame:
     return pd.read_csv(path)
 
 
-"""Inspect whether reported earlier purchases exist in a reference table.
-
-This module never modifies its input tables. When checking validation or test
-rows for use in a prediction pipeline, pass only the corresponding training
-transactions as ``history``. A matching count does not verify spend values.
-"""
-
-import numpy as np
+# Inspect whether reported earlier purchases exist in a reference table.
+#
+# This module never modifies its input tables. When checking validation or test
+# rows for use in a prediction pipeline, pass only the corresponding training
+# transactions as ``history``. A matching count does not verify spend values.
 
 
 def check_prior_transactions(data, history):
@@ -120,46 +122,31 @@ def flag_prior_maximum(data, tolerance=0.01):
     return flagged
 
 
-"""Check provided historical spend against available earlier transactions.
-
-Inputs are never modified. Use the appropriate training split as ``history``
-when auditing validation or test rows for a prediction pipeline. Other test
-rows must not be used as reference transactions.
-"""
-
-import numpy as np
-import pandas as pd
+# Check provided historical spend against available earlier transactions.
+#
+# Inputs are never modified. Use the appropriate training split as ``history``
+# when auditing validation or test rows for a prediction pipeline. Other test
+# rows must not be used as reference transactions.
 
 
-"""Set flagged maxima to missing and retain a recovery audit for later.
-
-Only the flagged ``prior_max_purchase_value`` cells are changed in the
-returned copy. Verified replacement values are recorded, never applied.
-
-Recovery classifications assume historical counts/totals are reliable and
-purchase amounts are non-negative. Use only strictly earlier training
-transactions as the reference. During validation, pass that fold's training
-rows as ``history``; never pass other validation/test rows.
-"""
-
-import numpy as np
-import pandas as pd
+# Set flagged maxima to missing and retain a recovery audit for later.
+#
+# Only the flagged ``prior_max_purchase_value`` cells are changed in the
+# returned copy. Verified replacement values are recorded, never applied.
+#
+# Recovery classifications assume historical counts/totals are reliable and
+# purchase amounts are non-negative. Use only strictly earlier training
+# transactions as the reference. During validation, pass that fold's training
+# rows as ``history``; never pass other validation/test rows.
 
 
-"""Audit rolling spend and mask invalid cells without applying reconstruction.
-
-Use mark_rolling_spend_missing for configurable windows. The original
-mark_spend_365d_missing name remains available for existing notebooks.
-Historical counts/totals are assumed reliable and purchases non-negative.
-Reference history must contain only the appropriate training rows, never
-other validation/test rows. Current and future purchases are always excluded.
-"""
-
-import re
-from numbers import Integral
-
-import numpy as np
-import pandas as pd
+# Audit rolling spend and mask invalid cells without applying reconstruction.
+#
+# Use mark_rolling_spend_missing for configurable windows. The original
+# mark_spend_365d_missing name remains available for existing notebooks.
+# Historical counts/totals are assumed reliable and purchases non-negative.
+# Reference history must contain only the appropriate training rows, never
+# other validation/test rows. Current and future purchases are always excluded.
 
 
 def _numeric(frame, column):
@@ -254,19 +241,15 @@ def _consistent_candidate(candidates, info, historical_total, tolerance):
     )
     return verified.where(valid)
 
-"""Set flagged maxima to missing and retain a recovery audit for later.
-
-Only the flagged ``prior_max_purchase_value`` cells are changed in the
-returned copy. Verified replacement values are recorded, never applied.
-
-Recovery classifications assume historical counts/totals are reliable and
-purchase amounts are non-negative. Use only strictly earlier training
-transactions as the reference. During validation, pass that fold's training
-rows as ``history``; never pass other validation/test rows.
-"""
-
-import numpy as np
-import pandas as pd
+# Set flagged maxima to missing and retain a recovery audit for later.
+#
+# Only the flagged ``prior_max_purchase_value`` cells are changed in the
+# returned copy. Verified replacement values are recorded, never applied.
+#
+# Recovery classifications assume historical counts/totals are reliable and
+# purchase amounts are non-negative. Use only strictly earlier training
+# transactions as the reference. During validation, pass that fold's training
+# rows as ``history``; never pass other validation/test rows.
 
 
 def mark_prior_maximum_missing(data, history, flagged_ids, tolerance=0.01):
@@ -423,6 +406,7 @@ def mark_prior_maximum_missing(data, history, flagged_ids, tolerance=0.01):
     result.loc[flagged_mask, "prior_max_purchase_value"] = np.nan
     audit = pd.DataFrame(records, columns=audit_columns)
     return result, audit
+
 
 def mark_rolling_spend_missing(
     data, history, windows=(30, 90, 180, 365), tolerance=0.01, sentinel=1e9
@@ -602,8 +586,6 @@ def mark_rolling_spend_missing(
     return result, combined
 
 
-
-
 def future_spend(group, days=90):
     dates = group["purchase_date"].to_numpy()
     amounts = group["Total a Pagar"].to_numpy()
@@ -617,7 +599,6 @@ def future_spend(group, days=90):
         totals.append(amounts[in_window].sum())
 
     return pd.Series(totals, index=group.index, dtype=float)
-
 
 
 def add_candidate_features(data):
@@ -644,5 +625,3 @@ def add_candidate_features(data):
     out["discount_share"] = discounts.div(gross.where(gross.gt(0)))
 
     return out
-
-

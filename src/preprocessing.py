@@ -1,3 +1,12 @@
+"""Rule-based repairs of the transaction data, using the customer's purchase history."""
+
+import numpy as np
+import pandas as pd
+
+TARGET = "repeat_purchase_90d"
+SPEND = "spend_next_90d"
+
+
 def rebuild_max(data, audit):
     """Restore verified maxima; leave unresolved cases as NaN."""
     result = data.copy()
@@ -10,6 +19,7 @@ def rebuild_max(data, audit):
     )
 
     return result
+
 
 def rebuild_rolling_spend(data, audit):
     """Restore verified spending; leave unresolved cells as NaN."""
@@ -24,8 +34,6 @@ def rebuild_rolling_spend(data, audit):
         )
 
     return result
-import pandas as pd
-import numpy as np
 def repair_negative_days(data, history, tolerance=0.01):
     days = "days_since_previous_purchase"
     mean = "prior_mean_gap_days"
@@ -115,6 +123,7 @@ def repair_negative_days(data, history, tolerance=0.01):
         "verified_value", "recovery_status",
     ])
     return result, audit
+
 
 def repair_missing_recency(data, history, tolerance=0.01):
     column = "days_since_previous_purchase"
@@ -227,9 +236,6 @@ def repair_missing_mean_gap(data):
     result.loc[eligible, column] = candidate.loc[eligible].to_numpy()
     return result, audit
 
-
-TARGET = "repeat_purchase_90d"
-SPEND = "spend_next_90d"
 
 def recover_spending_targets(data, tolerance=0.01):
     result = data.copy()
