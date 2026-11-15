@@ -4,6 +4,7 @@ a) Cleaning the raw files gives the same data as notebook 01 saved in data/proce
 b) Cleaning each test row alone gives the same result as cleaning all of test together,
    so a row never depends on other test rows (needed for the client interface).
 c) One new purchase with all six categories missing goes through without an error.
+d) load_clean reads the processed files with categories as text and purchase_date as a date.
 """
 import io
 import sys
@@ -13,7 +14,8 @@ import numpy as np
 import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))   # so "src" can be imported
-from src.cleaning import CATEGORICALS, clean_transactions
+from src.cleaning import clean_transactions
+from src.data import CATEGORICALS, load_clean
 
 
 def as_read(frame):
@@ -58,3 +60,10 @@ new_purchase = test.iloc[[0]].copy()
 new_purchase[CATEGORICALS] = np.nan                                 # these columns become numeric NaN
 cleaned = clean_transactions(new_purchase, history=train, is_train=False)
 print("   no error | categories after cleaning:", cleaned[CATEGORICALS].iloc[0].tolist())
+
+print("d) load_clean reads the processed files with the right types")
+for name in ["train_clean", "test_clean"]:
+    loaded = load_clean(f"data/processed/{name}.csv")
+    categories_are_text = all(pd.api.types.is_string_dtype(loaded[col]) for col in CATEGORICALS)
+    date_is_date = pd.api.types.is_datetime64_any_dtype(loaded["purchase_date"])
+    print(f"   {name}: categories as text: {categories_are_text} | purchase_date as date: {date_is_date}")

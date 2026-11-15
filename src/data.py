@@ -7,9 +7,20 @@ import numpy as np
 import pandas as pd
 
 
+# The six category columns, defined once for the whole project
+CATEGORICALS = ["payment_type", "salesperson", "commercial_zone",
+                "transport_method", "warehouse", "document_series"]
+
+
 def load_data(path: str) -> pd.DataFrame:
     """Load the raw dataset from a CSV file."""
     return pd.read_csv(path)
+
+
+def load_clean(path):
+    """Load a cleaned file from data/processed/ with the right types: category labels as text
+    (they are numbers like "7", read as numbers otherwise) and purchase_date as a date."""
+    return pd.read_csv(path, dtype={col: str for col in CATEGORICALS}, parse_dates=["purchase_date"])
 
 
 # Inspect whether reported earlier purchases exist in a reference table.

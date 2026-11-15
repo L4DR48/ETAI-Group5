@@ -2,7 +2,7 @@
 
 import pandas as pd
 
-from src.data import flag_prior_maximum, mark_prior_maximum_missing, mark_rolling_spend_missing
+from src.data import CATEGORICALS, flag_prior_maximum, mark_prior_maximum_missing, mark_rolling_spend_missing
 from src.preprocessing import (
     rebuild_max, rebuild_rolling_spend, recover_spending_targets,
     repair_missing_mean_gap, repair_missing_recency, repair_negative_days,
@@ -10,8 +10,6 @@ from src.preprocessing import (
 
 TARGET = "repeat_purchase_90d"
 SPEND = "spend_next_90d"
-CATEGORICALS = ["payment_type", "salesperson", "commercial_zone",
-                "transport_method", "warehouse", "document_series"]
 
 
 def clean_transactions(data, history, is_train):
