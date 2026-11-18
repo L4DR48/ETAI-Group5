@@ -1,0 +1,40 @@
+preprocessing:
+  # Never features: ID, customer_id, purchase_date, repeat_purchase_90d, spend_next_90d
+  numeric_features: [
+    "Total a Pagar", "Total Bruto", "Total Liquido", "Total Imp_", "Total Portes",
+    "Total Desc_ Global", "Total Desc_ Linha", "Custo", "N_ Detalhes", "invoice_count_current_purchase",
+    "days_since_previous_purchase", "customer_tenure_days", "prior_purchase_count", "prior_total_spend",
+    "prior_mean_purchase_value", "prior_std_purchase_value", "prior_min_purchase_value",
+    "prior_max_purchase_value", "prior_mean_gap_days", "prior_std_gap_days",
+    "purchase_count_30d", "spend_30d", "purchase_count_90d", "spend_90d",
+    "purchase_count_180d", "spend_180d", "purchase_count_365d", "spend_365d",
+    "random_noise",                                   # kept until validation decides (notebook 03)
+    "gap_ratio", "tax_rate", "island_missing",        # built by add_candidate_features
+  ]
+  categorical_features: ["payment_type", "salesperson", "commercial_zone",
+                         "transport_method", "warehouse", "document_series"]
+
+  # Long right tail (notebook 04, Section 1): log1p before scaling. [] or null = off
+  log1p_columns: [
+    "Total a Pagar", "Total Bruto", "Total Liquido", "Total Imp_", "Total Portes",
+    "Total Desc_ Global", "Total Desc_ Linha", "Custo", "N_ Detalhes",
+    "days_since_previous_purchase", "prior_purchase_count", "prior_total_spend",
+    "prior_mean_purchase_value", "prior_std_purchase_value", "prior_min_purchase_value",
+    "prior_max_purchase_value", "prior_mean_gap_days", "prior_std_gap_days",
+    "purchase_count_30d", "spend_30d", "purchase_count_90d", "spend_90d",
+    "purchase_count_180d", "spend_180d", "purchase_count_365d", "spend_365d",
+    "gap_ratio",                                      # max ~480
+  ]
+  cap_quantiles: [null, 0.99]                         # upper cap only: notebook 04 found no low outliers. null = no capping
+  scaler: "robust"                                    # none | standard | robust
+  min_frequency: 20                                   # levels with fewer training rows -> "infrequent"
+  add_indicator: false                                # <col>_was_missing flags for the imputed columns
+  no_history_days: 4000                               # > largest real gap in train (3,199) and tenure (3,506)
+  no_history_ratio: 10                                # gap_ratio with < 2 past purchases: ~99th percentile ("very late")
+
+  imputation:                                         # as in class 10
+    numeric_strategy: "median"                        # median | mean | knn | iterative | random_forest
+    n_neighbors: 5                                    # knn
+    max_iter: 10                                      # iterative, random_forest
+    n_estimators: 50                                  # random_forest
+    random_state: 42

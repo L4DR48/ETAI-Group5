@@ -1,345 +1,137 @@
-"""Rule-based repairs of the transaction data, using the customer's purchase history."""
+"""The preprocessor that goes inside the model Pipeline.
 
+1. fill_no_history: structural gaps (the customer has no history yet) get a fixed value.
+2. Numeric columns: optional capping -> optional log1p -> scaler -> imputer for the random gaps.
+3. Categorical columns: missing becomes its own category -> one-hot encoding.
+
+Structure from class 10 (10_missing_values.ipynb): _NUMERIC_IMPUTERS chosen with numeric_strategy,
+and numeric columns scaled first, then imputed. Everything learned (quantiles, scaler, imputer,
+encoder) is fitted on the training rows only, and never sees the target.
+"""
 import numpy as np
-import pandas as pd
+import yaml
+from sklearn.base import BaseEstimator, TransformerMixin
+from sklearn.compose import ColumnTransformer
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.experimental import enable_iterative_imputer   # noqa: F401  (makes IterativeImputer importable, as in class 10)
+from sklearn.impute import IterativeImputer, KNNImputer, SimpleImputer
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import FunctionTransformer, OneHotEncoder, RobustScaler, StandardScaler
 
-TARGET = "repeat_purchase_90d"
-SPEND = "spend_next_90d"
+# Number of past purchases a customer needs before each column can exist
+NEEDS_PAST_PURCHASES = {
+    "days_since_previous_purchase": 1,
+    "prior_min_purchase_value": 1,
+    "prior_mean_purchase_value": 1,
+    "prior_max_purchase_value": 1,
+    "prior_std_purchase_value": 2,
+    "prior_mean_gap_days": 2,
+    "prior_std_gap_days": 3,
+    "gap_ratio": 2,
+}
+DAY_COLUMNS = ["days_since_previous_purchase", "prior_mean_gap_days"]
+
+_SCALERS = {"none": "passthrough", "standard": StandardScaler, "robust": RobustScaler}
+
+# Numeric imputers, copied from class 10. "iterative" is MICE with one completed dataset;
+# "random_forest" is the missForest idea. They learn only from the feature columns, never the target.
+_NUMERIC_IMPUTERS = {
+    "median": lambda cfg, seed: SimpleImputer(strategy="median"),
+    "mean": lambda cfg, seed: SimpleImputer(strategy="mean"),
+    "knn": lambda cfg, seed: KNNImputer(n_neighbors=cfg.get("n_neighbors", 5)),
+    "iterative": lambda cfg, seed: IterativeImputer(max_iter=cfg.get("max_iter", 10), random_state=seed),
+    "random_forest": lambda cfg, seed: IterativeImputer(
+        estimator=RandomForestRegressor(n_estimators=cfg.get("n_estimators", 50), min_samples_leaf=5,
+                                        random_state=seed, n_jobs=-1),
+        max_iter=cfg.get("max_iter", 10), random_state=seed),
+}
 
 
-def rebuild_max(data, audit):
-    """Restore verified maxima; leave unresolved cases as NaN."""
-    result = data.copy()
-
-    replacements = audit.set_index("ID")["verified_maximum"]
-    flagged = result["ID"].isin(replacements.index)
-
-    result.loc[flagged, "prior_max_purchase_value"] = (
-        result.loc[flagged, "ID"].map(replacements)
-    )
-
-    return result
+def load_config(path="config.yaml"):
+    """Read the project settings."""
+    with open(path, encoding="utf-8") as f:
+        return yaml.safe_load(f)
 
 
-def rebuild_rolling_spend(data, audit):
-    """Restore verified spending; leave unresolved cells as NaN."""
-    result = data.copy()
+def fill_no_history(X, no_history_days, no_history_ratio):
+    """Structural gaps: fill a value only where it is missing because the customer has too few
+    past purchases. Value columns become 0 (no past purchase, so no past value or variation);
+    day columns become no_history_days ("never bought" is closest to "bought very long ago");
+    gap_ratio becomes no_history_ratio (these customers repeat like the "very late" ones).
+    Row-wise, learns nothing. Any other NaN is left for the imputer."""
+    X = X.copy()
+    for col, needed in NEEDS_PAST_PURCHASES.items():
+        no_history = X[col].isna() & (X["prior_purchase_count"] < needed)
+        if col in DAY_COLUMNS:
+            X.loc[no_history, col] = no_history_days
+        elif col == "gap_ratio":
+            X.loc[no_history, col] = no_history_ratio
+        else:
+            X.loc[no_history, col] = 0
+    return X
 
-    for column, group in audit.groupby("spend_column"):
-        replacements = group.set_index("ID")["verified_spend"]
-        flagged = result["ID"].isin(replacements.index)
 
-        result.loc[flagged, column] = (
-            result.loc[flagged, "ID"].map(replacements)
-        )
+class QuantileCapper(BaseEstimator, TransformerMixin):
+    """Caps each column at a lower and upper quantile learned on the training rows (NaN ignored).
+    Either side can be None, e.g. lower=None caps only the high values."""
 
-    return result
-def repair_negative_days(data, history, tolerance=0.01):
-    days = "days_since_previous_purchase"
-    mean = "prior_mean_gap_days"
-    result = data.copy()
-    base = data.reset_index(drop=True)
+    def __init__(self, lower=0.01, upper=0.99):
+        self.lower = lower
+        self.upper = upper
 
-    n = base["prior_purchase_count"]
-    n = n.where(np.isfinite(n) & n.ge(1) & n.eq(n.round()))
+    def fit(self, X, y=None):
+        self.feature_names_in_ = np.asarray(X.columns)
+        self.low_ = None if self.lower is None else X.quantile(self.lower)     # pandas quantile skips NaN
+        self.high_ = None if self.upper is None else X.quantile(self.upper)
+        return self
 
-    tenure = base["customer_tenure_days"]
-    tenure = tenure.where(np.isfinite(tenure) & tenure.ge(0))
+    def transform(self, X):
+        return X.clip(lower=self.low_, upper=self.high_, axis=1)   # NaN stays NaN
 
-    recency = base[days].where(base[days].between(0, tenure))
-    avg_gap = base[mean].where(base[mean].between(0, tenure))
+    def get_feature_names_out(self, input_features=None):
+        return self.feature_names_in_
 
-    # Candidates from valid summaries in the same row.
-    candidates = pd.DataFrame({
-        days: (tenure - (n - 1) * avg_gap).where(n.gt(1)),
-        mean: (tenure - recency) / (n - 1).where(n.gt(1)),
-    })
-    candidates.loc[n.eq(1), days] = tenure.loc[n.eq(1)]
-    candidates = candidates.where(
-        np.isfinite(candidates)
-        & candidates.ge(0)
-        & candidates.le(tenure, axis=0)
-    )
 
-    reference = history.assign(
-        purchase_date=pd.to_datetime(
-            history["purchase_date"], errors="coerce"
-        )
-    )
+def to_object(X):
+    """Categories as plain Python objects with np.nan, which SimpleImputer handles reliably."""
+    return X.astype(object).where(X.notna(), np.nan)
 
-    records = []
-    negative_rows = base[[days, mean]].lt(0).any(axis=1)
 
-    for index, row in base.loc[negative_rows].iterrows():
-        date = pd.to_datetime(row["purchase_date"], errors="coerce")
-        past = reference.loc[
-            reference["customer_id"].eq(row["customer_id"])
-            & reference["purchase_date"].lt(date)
-        ]
-        amounts = past["Total a Pagar"]
+def build_preprocessor(config):
+    """Unfitted preprocessor described by the "preprocessing" section of config.yaml."""
+    imputation = config.get("imputation", {})
+    numeric_strategy = imputation.get("numeric_strategy", "median")
+    if numeric_strategy not in _NUMERIC_IMPUTERS:
+        raise ValueError(f"Unknown numeric_strategy: {numeric_strategy}. Options: {list(_NUMERIC_IMPUTERS)}")
 
-        # Date-based reconstruction requires complete, usable history.
-        complete = (
-            len(past) == n.loc[index]
-            and amounts.notna().all()
-            and np.isfinite(amounts).all()
-            and amounts.ge(0).all()
-            and np.isclose(
-                amounts.sum(), row["prior_total_spend"],
-                atol=tolerance, rtol=0,
-            )
-        )
+    # Numeric branch: optional capping -> optional log1p -> scaler -> imputer (class 10: scale first, then impute)
+    numeric_steps = []
+    if config.get("cap_quantiles"):
+        lower, upper = config["cap_quantiles"]
+        numeric_steps.append(("cap", QuantileCapper(lower, upper)))
+    if config.get("log1p_columns"):
+        log1p = FunctionTransformer(np.log1p, feature_names_out="one-to-one")
+        numeric_steps.append(("log1p", ColumnTransformer([("log", log1p, config["log1p_columns"])],
+                                                         remainder="passthrough", verbose_feature_names_out=False)))
+    scaler = _SCALERS[config.get("scaler", "robust")]
+    numeric_steps.append(("scale", scaler() if callable(scaler) else scaler))
+    imputer = _NUMERIC_IMPUTERS[numeric_strategy](imputation, imputation.get("random_state"))
+    numeric_steps.append(("impute", imputer.set_params(add_indicator=config.get("add_indicator", False))))
 
-        for column in [days, mean]:
-            if not row[column] < 0:
-                continue
+    # Categorical branch: missing is its own category; rare and unseen levels go to "infrequent"
+    categorical_steps = [
+        ("to_object", FunctionTransformer(to_object, feature_names_out="one-to-one")),
+        ("impute", SimpleImputer(strategy="constant", fill_value="missing")),
+        ("encode", OneHotEncoder(handle_unknown="infrequent_if_exist",
+                                 min_frequency=config.get("min_frequency", 20), sparse_output=False)),
+    ]
 
-            value = candidates.at[index, column]
-            status = (
-                "verified_from_row"
-                if pd.notna(value) else "unresolved"
-            )
-
-            if pd.isna(value) and complete:
-                if column == days:
-                    value = (date - past["purchase_date"].max()).days
-                elif n.loc[index] > 1:
-                    span = (
-                        past["purchase_date"].max()
-                        - past["purchase_date"].min()
-                    ).days
-                    value = span / (n.loc[index] - 1)
-
-                if pd.notna(value):
-                    status = "complete_history"
-
-            result.loc[result["ID"].eq(row["ID"]), column] = value
-            records.append(
-                (row["ID"], column, row[column], value, status)
-            )
-
-    audit = pd.DataFrame(records, columns=[
-        "ID", "column", "original_value",
-        "verified_value", "recovery_status",
+    columns = ColumnTransformer([
+        ("numeric", Pipeline(numeric_steps), config["numeric_features"]),
+        ("categorical", Pipeline(categorical_steps), config["categorical_features"]),
     ])
-    return result, audit
-
-
-def repair_missing_recency(data, history, tolerance=0.01):
-    column = "days_since_previous_purchase"
-    result = data.copy()
-
-    reference = history.assign(
-        purchase_date=pd.to_datetime(
-            history["purchase_date"], errors="coerce"
-        )
-    )
-
-    eligible = (
-        data[column].isna()
-        & data["prior_purchase_count"].gt(0)
-    )
-    records = []
-
-    for _, row in data.loc[eligible].iterrows():
-        n = row["prior_purchase_count"]
-        tenure = row["customer_tenure_days"]
-        avg = row["prior_mean_gap_days"]
-        valid_count = np.isfinite(n) and n == int(n)
-        value = np.nan
-
-        # First try the summaries in this row.
-        if (
-            valid_count and pd.notna(tenure)
-            and np.isfinite(tenure) and tenure >= 0
-        ):
-            if n == 1:
-                value = tenure
-            elif pd.notna(avg) and np.isfinite(avg) and avg >= 0:
-                value = tenure - (n - 1) * avg
-
-        valid_value = (
-            np.isfinite(value)
-            and -1e-8 <= value <= tenure + 1e-8
-            and np.isclose(value, np.rint(value), atol=1e-8, rtol=0)
-        )
-        value = float(np.rint(value)) if valid_value else np.nan
-        status = (
-            "verified_from_row" if pd.notna(value) else "unresolved"
-        )
-
-        # Otherwise use dates only with verified complete history.
-        if pd.isna(value):
-            date = pd.to_datetime(row["purchase_date"], errors="coerce")
-            past = reference.loc[
-                reference["customer_id"].eq(row["customer_id"])
-                & reference["purchase_date"].lt(date)
-            ]
-            amounts = past["Total a Pagar"]
-
-            complete = (
-                valid_count and len(past) == n
-                and amounts.notna().all()
-                and np.isfinite(amounts).all()
-                and amounts.ge(0).all()
-                and np.isclose(
-                    amounts.sum(), row["prior_total_spend"],
-                    atol=tolerance, rtol=0,
-                )
-            )
-
-            if complete:
-                value = (date - past["purchase_date"].max()).days
-                status = "complete_history"
-
-        result.loc[result["ID"].eq(row["ID"]), column] = value
-        records.append((row["ID"], column, np.nan, value, status))
-
-    audit = pd.DataFrame(records, columns=[
-        "ID", "column", "original_value",
-        "verified_value", "recovery_status",
-    ])
-    return result, audit
-
-
-def repair_missing_mean_gap(data):
-    result = data.copy()
-    column = "prior_mean_gap_days"
-
-    n = data["prior_purchase_count"]
-    tenure = data["customer_tenure_days"]
-    recency = data["days_since_previous_purchase"]
-
-    eligible = data[column].isna() & n.ge(2)
-    valid_count = np.isfinite(n) & n.ge(2) & n.eq(n.round())
-    valid_timing = (
-        np.isfinite(tenure) & tenure.ge(0)
-        & np.isfinite(recency) & recency.between(0, tenure)
-    )
-
-    candidate = (tenure - recency) / (n - 1).where(valid_count)
-    candidate = candidate.where(
-        valid_timing & np.isfinite(candidate)
-    )
-
-    audit = data.loc[
-        eligible, ["ID", "prior_purchase_count", column]
-    ].rename(columns={column: "original_value"}).copy()
-
-    audit["verified_value"] = candidate.loc[eligible].to_numpy()
-    audit["recovery_status"] = np.where(
-        audit["verified_value"].notna(),
-        "verified_from_row",
-        "unresolved",
-    )
-
-    result.loc[eligible, column] = candidate.loc[eligible].to_numpy()
-    return result, audit
-
-
-def recover_spending_targets(data, tolerance=0.01):
-    result = data.copy()
-
-    missing = result[TARGET].eq(1) & result[SPEND].isna()
-
-    # Keep a separate record of each attempted repair.
-    repairs = (
-        result.loc[missing, ["ID", "customer_id"]]
-        .set_index("ID")
-        .copy()
-    )
-    repairs["verified_spend"] = np.nan
-    repairs["method"] = "unresolved"
-
-    dated = result.dropna(subset=["customer_id", "purchase_date"])
-
-    for _, group in (
-        dated.sort_values(["customer_id", "purchase_date"])
-        .groupby("customer_id")
-    ):
-        # Avoid ambiguous ordering of purchases on the same date.
-        if group["purchase_date"].duplicated().any():
-            continue
-
-        dates = group["purchase_date"].to_numpy()
-        paid = group["Total a Pagar"].to_numpy(
-            dtype=float, na_value=np.nan
-        )
-        counts = group["prior_purchase_count"].to_numpy(
-            dtype=float, na_value=np.nan
-        )
-        totals = group["prior_total_spend"].to_numpy(
-            dtype=float, na_value=np.nan
-        )
-        repeat = group[TARGET].to_numpy()
-        ids = group["ID"].to_numpy()
-
-        def complete_between(i, j):
-            """Check purchases from i up to, but excluding, j."""
-            endpoint_counts = counts[[i, j]]
-            endpoint_totals = totals[[i, j]]
-            amounts = paid[i:j + 1]
-
-            return (
-                np.isfinite(endpoint_counts).all()
-                and (endpoint_counts >= 0).all()
-                and (endpoint_counts == np.floor(endpoint_counts)).all()
-                and counts[j] - counts[i] == j - i
-                and np.isfinite(endpoint_totals).all()
-                and (endpoint_totals >= 0).all()
-                and np.isfinite(amounts).all()
-                and (amounts >= 0).all()
-                and np.isclose(
-                    totals[j] - totals[i],
-                    paid[i:j].sum(),
-                    atol=tolerance,
-                    rtol=0
-                )
-            )
-
-        for i, row_id in enumerate(ids):
-            if row_id not in repairs.index:
-                continue
-
-            end = dates[i] + np.timedelta64(90, "D")
-
-            inside = np.flatnonzero(
-                (dates > dates[i]) & (dates <= end)
-            )
-
-            if not len(inside):
-                continue
-
-            closing = np.flatnonzero(dates >= end)
-            method = None
-
-            # A purchase at or beyond the boundary lets us check
-            # that no purchases are missing before the window ends.
-            if (
-                len(closing)
-                and complete_between(i, int(closing[0]))
-            ):
-                method = "verified_with_later_purchase"
-
-            else:
-                last = int(inside[-1])
-
-                # repeat = 0 confirms no further purchase for 90 days
-                # after this last purchase, covering the remaining window.
-                if repeat[last] == 0 and complete_between(i, last):
-                    method = "verified_with_no_further_purchase"
-
-            if method is not None:
-                repairs.at[row_id, "verified_spend"] = round(
-                    float(paid[inside].sum()), 2
-                )
-                repairs.at[row_id, "method"] = method
-
-    # Fill only verified missing targets; unresolved cases stay NaN.
-    result.loc[missing, SPEND] = (
-        result.loc[missing, "ID"]
-        .map(repairs["verified_spend"])
-        .to_numpy()
-    )
-
-    return result, repairs.reset_index()
+    no_history = FunctionTransformer(fill_no_history, feature_names_out="one-to-one",
+                                     kw_args={"no_history_days": config["no_history_days"],
+                                              "no_history_ratio": config["no_history_ratio"]})
+    preprocessor = Pipeline([("no_history", no_history), ("columns", columns)])
+    return preprocessor.set_output(transform="pandas")   # keep column names at every step
