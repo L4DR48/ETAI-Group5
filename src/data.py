@@ -132,34 +132,6 @@ def flag_prior_maximum(data, tolerance=0.01):
 
     return flagged
 
-
-# Check provided historical spend against available earlier transactions.
-#
-# Inputs are never modified. Use the appropriate training split as ``history``
-# when auditing validation or test rows for a prediction pipeline. Other test
-# rows must not be used as reference transactions.
-
-
-# Set flagged maxima to missing and retain a recovery audit for later.
-#
-# Only the flagged ``prior_max_purchase_value`` cells are changed in the
-# returned copy. Verified replacement values are recorded, never applied.
-#
-# Recovery classifications assume historical counts/totals are reliable and
-# purchase amounts are non-negative. Use only strictly earlier training
-# transactions as the reference. During validation, pass that fold's training
-# rows as ``history``; never pass other validation/test rows.
-
-
-# Audit rolling spend and mask invalid cells without applying reconstruction.
-#
-# Use mark_rolling_spend_missing for configurable windows. The original
-# mark_spend_365d_missing name remains available for existing notebooks.
-# Historical counts/totals are assumed reliable and purchases non-negative.
-# Reference history must contain only the appropriate training rows, never
-# other validation/test rows. Current and future purchases are always excluded.
-
-
 def _numeric(frame, column):
     return pd.to_numeric(frame[column], errors="coerce").astype(float)
 
@@ -612,9 +584,13 @@ def future_spend(group, days=90):
     return pd.Series(totals, index=group.index, dtype=float)
 
 
-def add_candidate_features(data):
+def add_candidate_features(data, clientes):
+    """Add the three features the group kept: gap_ratio, tax_rate and island_missing.
+    Uses only the row itself and the customer table, so it works the same on train, test
+    and one new purchase. Rows are never added, removed or reordered."""
     out = data.copy()
 
+    # gap_ratio: days since the last purchase / the customer's usual gap (needs 2+ past purchases)
     recency = data["days_since_previous_purchase"]
     mean_gap = data["prior_mean_gap_days"]
     valid_gap = data["prior_purchase_count"].ge(2) & mean_gap.gt(0)
@@ -623,16 +599,16 @@ def add_candidate_features(data):
         mean_gap.where(valid_gap)
     )
 
+    # tax_rate: tax / net value of the purchase (only when the net value is positive)
     net_value = data["Total Liquido"]
     net = net_value.where(net_value.gt(0))
-    cost = data["Custo"]
-
-    out["margin"] = net.sub(cost).div(net).where(cost.gt(0))
     out["tax_rate"] = data["Total Imp_"].div(net)
-    out["cost_is_zero"] = cost.eq(0).astype("int8")
 
-    gross = data["Total Bruto"]
-    discounts = data["Total Desc_ Linha"] + data["Total Desc_ Global"]
-    out["discount_share"] = discounts.div(gross.where(gross.gt(0)))
+    # island_missing: 1 when the customer's island is not recorded in clientes, else 0.
+    # Left join keeps every purchase; many_to_one stops if a customer appears twice in clientes.
+    island = data[["customer_id"]].merge(
+        clientes[["customer_id", "island"]], on="customer_id", how="left", validate="many_to_one"
+    )["island"]
+    out["island_missing"] = island.isna().astype("int8").to_numpy()   # same row order as data
 
     return out

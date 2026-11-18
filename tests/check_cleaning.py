@@ -5,6 +5,8 @@ b) Cleaning each test row alone gives the same result as cleaning all of test to
    so a row never depends on other test rows (needed for the client interface).
 c) One new purchase with all six categories missing goes through without an error.
 d) load_clean reads the processed files with categories as text and purchase_date as a date.
+e) add_candidate_features keeps every row in order, adds exactly the three kept features,
+   and gives the same result for each test row alone as for all of test.
 """
 import io
 import sys
@@ -15,7 +17,7 @@ import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))   # so "src" can be imported
 from src.cleaning import clean_transactions
-from src.data import CATEGORICALS, load_clean
+from src.data import CATEGORICALS, add_candidate_features, load_clean
 
 
 def as_read(frame):
@@ -67,3 +69,16 @@ for name in ["train_clean", "test_clean"]:
     categories_are_text = all(pd.api.types.is_string_dtype(loaded[col]) for col in CATEGORICALS)
     date_is_date = pd.api.types.is_datetime64_any_dtype(loaded["purchase_date"])
     print(f"   {name}: categories as text: {categories_are_text} | purchase_date as date: {date_is_date}")
+
+print("e) add_candidate_features adds exactly gap_ratio, tax_rate and island_missing")
+clientes = pd.read_csv("data/clientes.csv")
+for name, data in [("train", train_clean), ("test ", test_clean)]:
+    features = add_candidate_features(data, clientes)
+    added = [col for col in features.columns if col not in data.columns]
+    same_order = (features["ID"].to_numpy() == data["ID"].to_numpy()).all()
+    island = features["island_missing"]
+    print(f"   {name}: rows {len(data)} -> {len(features)} | same order: {same_order} | added: {added} | "
+          f"island_missing NaN: {island.isna().sum()}, values: {sorted(island.unique().tolist())}")
+test_features = add_candidate_features(test_clean, clientes)
+one_by_one = pd.concat([add_candidate_features(test_clean.iloc[[i]], clientes) for i in range(len(test_clean))])
+report("   each test row alone vs all of test", one_by_one, test_features)
