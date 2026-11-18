@@ -97,9 +97,21 @@ def to_object(X):
     return X.astype(object).where(X.notna(), np.nan)
 
 
+def drop_columns(X, columns):
+    """Drops the listed columns (near-duplicates of another column, |Spearman| > 0.95 in train)."""
+    return X.drop(columns=columns)
+
+
+def names_after_drop(transformer, input_features):
+    """Column names left after drop_columns (a named function, so the fitted pipeline can be saved)."""
+    return [name for name in input_features if name not in transformer.kw_args["columns"]]
+
+
 def build_preprocessor(config):
     """Unfitted preprocessor described by the "preprocessing" section of config.yaml."""
     imputation = config.get("imputation", {})
+    dropped = config.get("drop_correlated") or []
+    without_dropped = lambda columns: [col for col in columns if col not in dropped]   # noqa: E731
     numeric_strategy = imputation.get("numeric_strategy", "median")
     if numeric_strategy not in _NUMERIC_IMPUTERS:
         raise ValueError(f"Unknown numeric_strategy: {numeric_strategy}. Options: {list(_NUMERIC_IMPUTERS)}")
@@ -111,7 +123,7 @@ def build_preprocessor(config):
         numeric_steps.append(("cap", QuantileCapper(lower, upper)))
     if config.get("log1p_columns"):
         log1p = FunctionTransformer(np.log1p, feature_names_out="one-to-one")
-        numeric_steps.append(("log1p", ColumnTransformer([("log", log1p, config["log1p_columns"])],
+        numeric_steps.append(("log1p", ColumnTransformer([("log", log1p, without_dropped(config["log1p_columns"]))],
                                                          remainder="passthrough", verbose_feature_names_out=False)))
     scaler = _SCALERS[config.get("scaler", "robust")]
     numeric_steps.append(("scale", scaler() if callable(scaler) else scaler))
@@ -127,11 +139,14 @@ def build_preprocessor(config):
     ]
 
     columns = ColumnTransformer([
-        ("numeric", Pipeline(numeric_steps), config["numeric_features"]),
+        ("numeric", Pipeline(numeric_steps), without_dropped(config["numeric_features"])),
         ("categorical", Pipeline(categorical_steps), config["categorical_features"]),
     ])
     no_history = FunctionTransformer(fill_no_history, feature_names_out="one-to-one",
                                      kw_args={"no_history_days": config["no_history_days"],
                                               "no_history_ratio": config["no_history_ratio"]})
-    preprocessor = Pipeline([("no_history", no_history), ("columns", columns)])
+    # Correlation filter first: it never uses the target, so deciding it on train doesn't leak labels
+    drop = FunctionTransformer(drop_columns, kw_args={"columns": dropped},
+                               feature_names_out=names_after_drop)
+    preprocessor = Pipeline([("drop_correlated", drop), ("no_history", no_history), ("columns", columns)])
     return preprocessor.set_output(transform="pandas")   # keep column names at every step

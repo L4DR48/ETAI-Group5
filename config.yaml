@@ -8,11 +8,17 @@ preprocessing:
     "prior_max_purchase_value", "prior_mean_gap_days", "prior_std_gap_days",
     "purchase_count_30d", "spend_30d", "purchase_count_90d", "spend_90d",
     "purchase_count_180d", "spend_180d", "purchase_count_365d", "spend_365d",
-    "random_noise",                                   # kept until validation decides (notebook 03)
+    "random_noise",                                   # kept for now: a validation comparison (with vs without, same
+                                                      # time-based folds, a tree model) decides, as notebook 01 planned
     "gap_ratio", "tax_rate", "island_missing",        # built by add_candidate_features
   ]
   categorical_features: ["payment_type", "salesperson", "commercial_zone",
                          "transport_method", "warehouse", "document_series"]
+
+  # Near-duplicates (|Spearman| > 0.95 in train, notebook 03 Section 5): one column of each pair is
+  # dropped before anything else. Invoice totals: keep Total a Pagar, because the spend target is the sum
+  # of Total a Pagar of later purchases (notebook 01, Section 5). 30 days: keep purchase_count_30d.
+  drop_correlated: ["Total Liquido", "Total Bruto", "spend_30d"]
 
   # Long right tail (notebook 04, Section 1): log1p before scaling. [] or null = off
   log1p_columns: [
@@ -27,14 +33,22 @@ preprocessing:
   ]
   cap_quantiles: [null, 0.99]                         # upper cap only: notebook 04 found no low outliers. null = no capping
   scaler: "robust"                                    # none | standard | robust
-  min_frequency: 20                                   # levels with fewer training rows -> "infrequent"
+  min_frequency: 20                                   # levels with fewer training rows -> "infrequent" (to be chosen by validation)
   add_indicator: false                                # <col>_was_missing flags for the imputed columns
   no_history_days: 4000                               # > largest real gap in train (3,199) and tenure (3,506)
   no_history_ratio: 10                                # gap_ratio with < 2 past purchases: ~99th percentile ("very late")
 
   imputation:                                         # as in class 10
-    numeric_strategy: "median"                        # median | mean | knn | iterative | random_forest
+    numeric_strategy: "iterative"                     # median | mean | knn | iterative | random_forest (notebook 04, Section 3)
     n_neighbors: 5                                    # knn
     max_iter: 10                                      # iterative, random_forest
     n_estimators: 50                                  # random_forest
     random_state: 42
+
+feature_selection:                                    # class 08, Section 6
+  enabled: true
+  min_votes: 2                                        # 1 (keep almost all) .. 3 (keep only unanimous); to be chosen by validation
+  random_state: 42
+  lasso_alpha: 0.01                                   # L1 voter for the regression task (Lasso)
+  search_space:                                       # tuned together with the model when tuning is on
+    select__min_votes: {type: int, low: 1, high: 3}
