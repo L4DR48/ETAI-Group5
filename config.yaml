@@ -31,7 +31,13 @@ preprocessing:
     "purchase_count_180d", "spend_180d", "purchase_count_365d", "spend_365d",
     "gap_ratio",                                      # max ~480
   ]
-  cap_quantiles: [null, 0.99]                         # upper cap only: notebook 04 found no low outliers. null = no capping
+  cap_quantiles: [null, 0.99 ] #, 0.99                        upper cap only: notebook 04 found no low outliers. null = no capping
+  # Candidate capping policy: monetary features only. Compare with cap_quantiles: null in validation.
+  # Tenure, counts, binary flags, tax_rate and structural gap sentinels are not percentile-capped.
+  cap_columns: ["Total a Pagar", "Total Imp_", "Total Portes", "Total Desc_ Global",
+                "Total Desc_ Linha", "Custo", "prior_total_spend", "prior_mean_purchase_value",
+                "prior_std_purchase_value", "prior_min_purchase_value", "prior_max_purchase_value",
+                "spend_90d", "spend_180d", "spend_365d"]
   scaler: "robust"                                    # none | standard | robust
   min_frequency: 20                                   # levels with fewer training rows -> "infrequent" (to be chosen by validation)
   add_indicator: false                                # <col>_was_missing flags for the imputed columns
@@ -39,7 +45,7 @@ preprocessing:
   no_history_ratio: 10                                # gap_ratio with < 2 past purchases: ~99th percentile ("very late")
 
   imputation:                                         # as in class 10
-    numeric_strategy: "iterative"                     # median | mean | knn | iterative | random_forest (notebook 04, Section 3)
+    numeric_strategy: "random_forest"                     # median | mean | knn | iterative | random_forest (notebook 04, Section 3)
     n_neighbors: 5                                    # knn
     max_iter: 10                                      # iterative, random_forest
     n_estimators: 50                                  # random_forest
@@ -52,3 +58,9 @@ feature_selection:                                    # class 08, Section 6
   lasso_alpha: 0.01                                   # L1 voter for the regression task (Lasso)
   search_space:                                       # tuned together with the model when tuning is on
     select__min_votes: {type: int, low: 1, high: 3}
+
+validation:
+  n_splits: 3
+  initial_train_fraction: 0.6
+  label_horizon_days: 90
+  imputation_strategies: [median, mean, knn, iterative, random_forest]

@@ -397,18 +397,21 @@ def mark_rolling_spend_missing(
     """Return (cleaned_copy, audit), checking the requested rolling windows.
 
     Each integer N uses spend_Nd, purchase_count_Nd and reference purchases
-    in [purchase_date - N days, purchase_date). Existing missing values stay
-    missing and are not labelled as newly detected errors.
+    in [purchase_date - N days, purchase_date). Supply the training history
+    available to the fold when checking validation or test purchases.
 
-    Only flagged cells in requested spend columns are set to NaN. Counts and
-    all other fields are preserved. Each audit row identifies one flagged
-    cell using ID, window_days and spend_column. Its original_spend and any
-    verified_spend are retained for later treatment; no candidate is applied.
+    Invalid recorded amounts are set to NaN. An already missing spend_365d
+    also enters the audit when its amount can be recovered within tolerance.
+    original_spend is missing on these extra audit rows, and reason is
+    "verified_missing_annual_spend". rebuild_rolling_spend applies the
+    amounts in verified_spend. Unresolved annual blanks stay missing.
 
     Checks include sentinels, negatives/non-finite amounts, total-spend
-    bounds, zero-count identities and reference-history comparisons. Other
-    windows provide comparisons through verified amounts, so an unverified
-    corrupt neighbour cannot contaminate the checks.
+    bounds, zero-count identities and reference-history comparisons. For
+    annual recovery, a shorter window such as 180 days supplies a candidate
+    when its checked amount is available and the purchase counts match.
+    Shorter windows are checked even when only 365 days is requested.
+    Only requested windows are modified.
 
     windows, tolerance and sentinel can be supplied from config.yaml.
     """
@@ -419,10 +422,12 @@ def mark_rolling_spend_missing(
     ):
         raise ValueError("windows must contain positive integer day counts.")
     windows = tuple(sorted(set(int(days) for days in windows)))
+
     if not np.isfinite(tolerance) or tolerance < 0:
         raise ValueError("tolerance must be finite and non-negative.")
     if data["ID"].isna().any() or not data["ID"].is_unique:
         raise ValueError("data must have non-missing, unique transaction IDs.")
+
     for days in windows:
         needed = {f"spend_{days}d", f"purchase_count_{days}d"}
         if not needed.issubset(data.columns):
@@ -435,6 +440,7 @@ def mark_rolling_spend_missing(
         and int(match.group(1)) > 0
         and f"purchase_count_{match.group(1)}d" in data.columns
     })
+
     result = data.copy()
     base = data.reset_index(drop=True).copy()
     base["purchase_date"] = pd.to_datetime(base["purchase_date"], errors="coerce")
@@ -442,6 +448,7 @@ def mark_rolling_spend_missing(
     lifetime_count = _numeric(base, "prior_purchase_count")
     prepared = _prepare_history(history)
     information, seed_values = {}, {}
+    annual_evidence = {}
 
     for days in available:
         expected = _numeric(base, f"purchase_count_{days}d")
@@ -471,9 +478,10 @@ def mark_rolling_spend_missing(
         }
         seed_values[days] = _consistent_candidate(seeds, info, total, tolerance)
         information[days] = info
+        if days == 365:
+            annual_evidence.update(seeds)
 
-    # Equal counts in nested windows imply identical purchase sets. Use only
-    # independently verified neighbours when establishing that identity.
+    # Equal purchase counts in nested windows mean they contain the same purchases.
     verified_values = {}
     for days in available:
         info = information[days]
@@ -486,12 +494,21 @@ def mark_rolling_spend_missing(
                 & info["expected_count"].eq(information[other]["expected_count"])
             )
             candidates[f"same_count_{other}d"] = seed_values[other].where(same_count)
+
         verified_values[days] = _consistent_candidate(
             candidates, info, total, tolerance
         )
+        if days == 365:
+            # Keep each source so that conflicting amounts can be detected.
+            annual_evidence.update(candidates)
 
     audits, empty_template = [], None
-    for days in windows:
+    check_windows = set(windows)
+    checked_shorter_spend = {}
+    if 365 in windows:
+        check_windows.update(days for days in available if days < 365)
+
+    for days in sorted(check_windows):
         column = f"spend_{days}d"
         original = base[column]
         spend = _numeric(base, column)
@@ -502,6 +519,7 @@ def mark_rolling_spend_missing(
             info["count_valid"] & _valid_count(lifetime_count)
             & expected.eq(lifetime_count)
         )
+
         reasons = pd.DataFrame({
             "sentinel": spend.eq(sentinel),
             "negative": spend.lt(0),
@@ -526,14 +544,63 @@ def mark_rolling_spend_missing(
                 verified.notna() & spend.sub(verified).abs().gt(tolerance)
             ),
         }, index=base.index)
+
         for other in available:
             anchor = verified_values[other]
             if other < days:
                 reasons[f"below_verified_{other}d_spend"] = spend.lt(anchor - tolerance)
             elif other > days:
                 reasons[f"above_verified_{other}d_spend"] = spend.gt(anchor + tolerance)
+
         reasons = reasons.fillna(False)
-        flagged = original.notna() & reasons.any(axis=1)
+        invalid = original.notna() & reasons.any(axis=1)
+        audit_rows = invalid
+
+        if 365 in windows and days < 365:
+            checked_shorter_spend[days] = spend.where(info["count_valid"] & ~invalid)
+        if days not in windows:
+            continue
+
+        if days == 365:
+            counts_ok = info["count_valid"] & (
+                lifetime_count.isna()
+                | (_valid_count(lifetime_count) & expected.le(lifetime_count))
+            )
+            lower_bounds = [info["observed_spend"]]
+
+            for shorter, shorter_spend in checked_shorter_spend.items():
+                short_info = information[shorter]
+                short_count = short_info["expected_count"]
+
+                # Purchases in the part of the year outside the shorter window.
+                outer_count = expected - short_count
+                outer_found = info["transactions_found"] - short_info["transactions_found"]
+
+                counts_ok &= short_count.isna() | (
+                    short_info["count_valid"] & outer_count.ge(0)
+                    & (
+                        short_info["transactions_found"].isna()
+                        | short_info["transactions_found"].le(short_count)
+                    )
+                    & (outer_found.isna() | outer_found.le(outer_count))
+                )
+
+                # If there were no additional purchases, both spends must match.
+                annual_evidence[f"checked_spend_{shorter}d"] = shorter_spend.where(
+                    outer_count.eq(0)
+                )
+                lower_bounds.append(shorter_spend)
+
+            verified = _consistent_candidate(annual_evidence, info, total, tolerance)
+            lower_bound = pd.concat(lower_bounds, axis=1).max(axis=1)
+            verified = verified.where(
+                counts_ok & verified.ne(sentinel)
+                & (lower_bound.isna() | verified.ge(lower_bound - tolerance))
+            )
+
+            recovered_blank = original.isna() & verified.notna()
+            reasons["verified_missing_annual_spend"] = recovered_blank
+            audit_rows = invalid | recovered_blank
 
         audit = base[["ID", "customer_id", "purchase_date"]].copy()
         audit["window_days"] = days
@@ -556,32 +623,20 @@ def mark_rolling_spend_missing(
         audit["sign_flip_verified"] = (
             spend.lt(0) & spend.abs().sub(verified).abs().le(tolerance)
         )
+
         reason = pd.Series("", index=base.index, dtype=object)
         for label in reasons.columns:
             reason += np.where(reasons[label], label + "; ", "")
         audit["reason"] = reason.str.rstrip("; ")
+
         empty_template = audit.iloc[:0].copy()
-        if flagged.any():
-            audits.append(audit.loc[flagged].copy())
-            result.loc[flagged.to_numpy(), column] = np.nan
+        if audit_rows.any():
+            audits.append(audit.loc[audit_rows].copy())
+        if invalid.any():
+            result.loc[invalid.to_numpy(), column] = np.nan
 
     combined = pd.concat(audits, ignore_index=True) if audits else empty_template
     return result, combined
-
-
-def future_spend(group, days=90):
-    dates = group["purchase_date"].to_numpy()
-    amounts = group["Total a Pagar"].to_numpy()
-
-    totals = []
-    for date in dates:
-        in_window = (
-            (dates > date)
-            & (dates <= date + np.timedelta64(days, "D"))
-        )
-        totals.append(amounts[in_window].sum())
-
-    return pd.Series(totals, index=group.index, dtype=float)
 
 
 def add_candidate_features(data, clientes):
