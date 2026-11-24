@@ -1,3 +1,27 @@
+data:
+  path: "data/compas_two_year_recidivism.csv"
+  target: "two_year_recid"
+  sensitive_attr: "race"          # excluded from model features, used only to audit fairness
+  drop_columns: ["id", "decile_score", "score_text"]  # identifiers / COMPAS's own score, not our model's inputs
+
+test_set:
+  size: 0.2
+  random_state: 42
+
+cv:
+  n_splits: 10
+  shuffle: true
+  random_state: 42
+  metrics: ["accuracy", "balanced_accuracy", "precision", "recall", "f1", "fbeta_2", "roc_auc", "average_precision"]
+  selection_metric: "f1" 
+  n_jobs: 1   
+
+validation:
+  n_splits: 3
+  initial_train_fraction: 0.6
+  label_horizon_days: 90
+  imputation_strategies: [median, mean, knn, iterative, random_forest]
+
 preprocessing:
   # Never features: ID, customer_id, purchase_date, repeat_purchase_90d, spend_next_90d
   numeric_features: [
@@ -45,11 +69,11 @@ preprocessing:
   no_history_ratio: 10                                # gap_ratio with < 2 past purchases: ~99th percentile ("very late")
 
   imputation:                                         # as in class 10
-    numeric_strategy: "random_forest"                     # median | mean | knn | iterative | random_forest (notebook 04, Section 3)
+    numeric_strategy: "median"                     # median | mean | knn | iterative | random_forest (notebook 04, Section 3)
+    categorical_strategy: "most_frequent"
     n_neighbors: 5                                    # knn
     max_iter: 10                                      # iterative, random_forest
     n_estimators: 50                                  # random_forest
-    random_state: 42
 
 feature_selection:                                    # class 08, Section 6
   enabled: true
@@ -59,8 +83,76 @@ feature_selection:                                    # class 08, Section 6
   search_space:                                       # tuned together with the model when tuning is on
     select__min_votes: {type: int, low: 1, high: 3}
 
-validation:
-  n_splits: 3
-  initial_train_fraction: 0.6
-  label_horizon_days: 90
-  imputation_strategies: [median, mean, knn, iterative, random_forest]
+model:
+  type: "xgboost"   # "adaboost" | "naive_bayes" | "gradient_boosting" | "hist_gradient_boosting" | "logistic_regression" | "dummy" | "random_forest" | "decision_tree" | "oblique_random_forest"
+  params: {n_estimators: 300, learning_rate: 0.05, max_depth: 4, random_state: 42, n_jobs: -1}
+  # logistic_regression:    {max_iter: 2000, class_weight: balanced}
+  # naive_bayes:            {}
+  # decision_tree:          {random_state: 42, class_weight: balanced}
+  # random_forest:          {n_estimators: 200, random_state: 42, n_jobs: -1, class_weight: balanced}
+  # oblique_random_forest:  {n_estimators: 200, n_components: 10, random_state: 42, n_jobs: -1}
+  # adaboost:               {max_depth: 1, n_estimators: 200, learning_rate: 1.0, random_state: 42}
+  # hist_gradient_boosting: {random_state: 42, class_weight: balanced}
+  # gradient_boosting:      {random_state: 42}
+  # dummy:                  {random_state: 42}
+  # xgboost:                {n_estimators: 300, learning_rate: 0.05, max_depth: 4, random_state: 42, n_jobs: -1}
+
+  tuning:
+  enabled: true
+  n_trials: 15
+  n_splits: 10                                       # folds that score each candidate
+  random_state: 42                                  # seeds the sampler and those folds
+  # Keys are Pipeline parameter names. Types: int / float (low, high, log) or categorical (choices).
+  # Ensembles take minutes per run: use a small n_trials while testing.
+  search_spaces:
+    logistic_regression:
+      model__C: {type: float, low: 0.001, high: 100.0, log: true}
+      model__penalty: {type: categorical, choices: ["l1", "l2"]}
+      model__solver: {type: categorical, choices: ["saga"]} # "saga" handles both l1 and l2
+    dummy:
+      model__strategy: {type: categorical, choices: ["most_frequent", "prior", "stratified"]}
+    decision_tree:
+      model__max_depth: {type: int, low: 1, high: 20}
+      model__min_samples_leaf: {type: int, low: 1, high: 200, log: true}
+      model__criterion: {type: categorical, choices: ["gini", "entropy"]}
+    random_forest:
+      model__max_depth: {type: int, low: 2, high: 30}
+      model__min_samples_leaf: {type: int, low: 1, high: 200, log: true}
+      model__max_features: {type: categorical, choices: ["sqrt", 0.5, 1.0]}
+    oblique_random_forest:
+      model__estimator__tree__max_depth: {type: int, low: 2, high: 30}
+      model__estimator__tree__min_samples_leaf: {type: int, low: 1, high: 200, log: true}
+      model__estimator__project__n_components: {type: int, low: 3, high: 10}   # <= number of features
+    adaboost:
+      model__estimator__max_depth: {type: int, low: 1, high: 8}
+      model__n_estimators: {type: int, low: 25, high: 400, log: true}
+      model__learning_rate: {type: float, low: 0.01, high: 1.0, log: true}
+    gradient_boosting:
+      model__n_estimators: {type: int, low: 25, high: 500, log: true}
+      model__learning_rate: {type: float, low: 0.01, high: 0.5, log: true}
+      model__max_depth: {type: int, low: 1, high: 6}
+      model__min_samples_leaf: {type: int, low: 1, high: 200, log: true}
+      model__subsample: {type: float, low: 0.5, high: 1.0}
+    hist_gradient_boosting:
+      model__max_iter: {type: int, low: 25, high: 500, log: true}
+      model__learning_rate: {type: float, low: 0.01, high: 0.5, log: true}
+      model__max_leaf_nodes: {type: int, low: 2, high: 63, log: true}
+      model__min_samples_leaf: {type: int, low: 5, high: 200, log: true}
+      model__l2_regularization: {type: float, low: 0.000001, high: 10.0, log: true}
+    naive_bayes:
+      model__var_smoothing: {type: float, low: 0.000000000001, high: 0.1, log: true}
+    xgboost:
+      model__n_estimators: {type: int, low: 50, high: 600, log: true}
+      model__learning_rate: {type: float, low: 0.01, high: 0.3, log: true}
+      model__max_depth: {type: int, low: 1, high: 8}
+      model__min_child_weight: {type: float, low: 1.0, high: 50.0, log: true}
+      model__subsample: {type: float, low: 0.5, high: 1.0}
+      model__colsample_bytree: {type: float, low: 0.5, high: 1.0}
+      model__reg_lambda: {type: float, low: 0.01, high: 10.0, log: true}
+      model__reg_alpha: {type: float, low: 0.001, high: 10.0, log: true}
+      model__gamma: {type: float, low: 0.0, high: 5.0}
+
+output:
+  results_dir: "results"   # each run's full report is saved here as a timestamped .txt file
+  model_path: "models/model.joblib"                 # the final fitted pipeline, used by predict.py (overwritten each run)
+  scoreboard: "results/runs.csv"   # one row per run; delete it when the data, cleaning or folds change
