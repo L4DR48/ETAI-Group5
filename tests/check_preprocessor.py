@@ -71,3 +71,13 @@ for cap in [None, [0.01, 0.99]]:
         out = build_preprocessor(options).fit(train).transform(test)
         print(f"   capping {'on ' if cap else 'off'} | log1p {'on ' if log1p else 'off'} -> columns: {out.shape[1]}"
               f" | NaN left: {out.isna().sum().sum()}")
+
+print("7) capping touches only cap_columns (fit on train)")
+fitted = build_preprocessor(config).fit(train)
+numeric_in = fitted["columns"].transformers_[0][2]                  # the columns the numeric branch receives
+before = fitted[:-1].transform(train)[numeric_in]                  # after drop_correlated and fill_no_history
+after = fitted["columns"].named_transformers_["numeric"]["cap"].transform(before)
+for col in ["customer_tenure_days", "Total a Pagar"]:
+    changed = int(((after[col] != before[col]) & before[col].notna()).sum())
+    print(f"   {col:22s} in cap_columns: {col in config['cap_columns']} | values changed by capping: {changed} | "
+          f"max before: {before[col].max():.0f} -> after: {after[col].max():.0f}")

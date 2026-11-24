@@ -7,7 +7,10 @@ clean_transactions chains them in the same order as notebook 01.
 import numpy as np
 import pandas as pd
 
-from src.data import CATEGORICALS, flag_prior_maximum, mark_prior_maximum_missing, mark_rolling_spend_missing
+from src.data import (
+    CATEGORICALS, add_candidate_features, flag_prior_maximum, mark_prior_maximum_missing,
+    mark_rolling_spend_missing,
+)
 
 TARGET = "repeat_purchase_90d"
 SPEND = "spend_next_90d"
@@ -394,3 +397,13 @@ def clean_transactions(data, history, is_train):
         out[col] = out[col].astype("string").str.strip().str.extract(r"(\d+)$", expand=False)
 
     return out
+
+
+def predictors(raw, is_train, history, lookup, features):
+    """Raw purchases -> clean_transactions -> add_candidate_features, indexed by ID, keeping only
+    the listed feature columns. `lookup` is the customer table (for island_missing)."""
+    cleaned = clean_transactions(
+        raw, history=history, is_train=is_train
+    )
+    engineered = add_candidate_features(cleaned, lookup)
+    return engineered.set_index("ID")[features]

@@ -639,6 +639,22 @@ def mark_rolling_spend_missing(
     return result, combined
 
 
+def future_spend(group, days=90):
+    """Sum of Total a Pagar of one customer's later purchases within `days` after each purchase."""
+    dates = group["purchase_date"].to_numpy()
+    amounts = group["Total a Pagar"].to_numpy()
+
+    totals = []
+    for date in dates:
+        in_window = (
+            (dates > date)
+            & (dates <= date + np.timedelta64(days, "D"))
+        )
+        totals.append(amounts[in_window].sum())
+
+    return pd.Series(totals, index=group.index, dtype=float)
+
+
 def add_candidate_features(data, clientes):
     """Add the three features the group kept: gap_ratio, tax_rate and island_missing.
     Uses only the row itself and the customer table, so it works the same on train, test

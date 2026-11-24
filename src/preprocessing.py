@@ -8,7 +8,6 @@ Structure from class 10 (10_missing_values.ipynb): _NUMERIC_IMPUTERS chosen with
 and numeric columns scaled first, then imputed. Everything learned (quantiles, scaler, imputer,
 encoder) is fitted on the training rows only, and never sees the target.
 """
-import pandas as pd
 import numpy as np
 import yaml
 from sklearn.base import BaseEstimator, TransformerMixin
@@ -121,7 +120,13 @@ def build_preprocessor(config):
     numeric_steps = []
     if config.get("cap_quantiles"):
         lower, upper = config["cap_quantiles"]
-        numeric_steps.append(("cap", QuantileCapper(lower, upper)))
+        if config.get("cap_columns"):
+            # Only the cap_columns are capped; the others pass through unchanged (like log1p_columns below)
+            numeric_steps.append(("cap", ColumnTransformer([("cap", QuantileCapper(lower, upper),
+                                                             without_dropped(config["cap_columns"]))],
+                                                           remainder="passthrough", verbose_feature_names_out=False)))
+        else:
+            numeric_steps.append(("cap", QuantileCapper(lower, upper)))       # no list: cap every numeric column
     if config.get("log1p_columns"):
         log1p = FunctionTransformer(np.log1p, feature_names_out="one-to-one")
         numeric_steps.append(("log1p", ColumnTransformer([("log", log1p, without_dropped(config["log1p_columns"]))],
@@ -151,35 +156,3 @@ def build_preprocessor(config):
                                feature_names_out=names_after_drop)
     preprocessor = Pipeline([("drop_correlated", drop), ("no_history", no_history), ("columns", columns)])
     return preprocessor.set_output(transform="pandas")   # keep column names at every step
-
-
-
-from src.cleaning import clean_transactions
-from src.data import add_candidate_features
-
-
-def predictors(raw, is_train, history, lookup, features):
-    cleaned = clean_transactions(
-        raw, history=history, is_train=is_train
-    )
-    engineered = add_candidate_features(cleaned, lookup)
-    return engineered.set_index("ID")[features]
-
-
-def predict_spend_eur(preprocessor, rows, field, config):  
-    transformed = preprocessor.transform(rows)
-    numeric_pipe = preprocessor["columns"].named_transformers_["numeric"]
-
-    # The log step can reorder columns. Undo scaling in the fitted order.
-    names = list(numeric_pipe[:-1].get_feature_names_out())
-    values = transformed[[f"numeric__{name}" for name in names]].to_numpy()
-
-    scaler = numeric_pipe["scale"]
-    if scaler != "passthrough":
-        values = scaler.inverse_transform(values)
-
-    spend = values[:, names.index(field)]
-    if field in (config.get("log1p_columns") or []):
-        spend = np.expm1(spend)
-
-    return pd.Series(spend, index=rows.index)

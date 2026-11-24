@@ -55,7 +55,7 @@ preprocessing:
     "purchase_count_180d", "spend_180d", "purchase_count_365d", "spend_365d",
     "gap_ratio",                                      # max ~480
   ]
-  cap_quantiles: [null, 0.99 ] #, 0.99                        upper cap only: notebook 04 found no low outliers. null = no capping
+  cap_quantiles: [null, 0.99]                         # upper cap only: notebook 04 found no low outliers. null = no capping
   # Candidate capping policy: monetary features only. Compare with cap_quantiles: null in validation.
   # Tenure, counts, binary flags, tax_rate and structural gap sentinels are not percentile-capped.
   cap_columns: ["Total a Pagar", "Total Imp_", "Total Portes", "Total Desc_ Global",
@@ -70,10 +70,10 @@ preprocessing:
 
   imputation:                                         # as in class 10
     numeric_strategy: "median"                     # median | mean | knn | iterative | random_forest (notebook 04, Section 3)
-    categorical_strategy: "most_frequent"
     n_neighbors: 5                                    # knn
     max_iter: 10                                      # iterative, random_forest
     n_estimators: 50                                  # random_forest
+    random_state: 42                                  # seed for iterative and random_forest (reproducible)
 
 feature_selection:                                    # class 08, Section 6
   enabled: true
